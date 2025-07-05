@@ -87,6 +87,7 @@ std::string removeExtension(const std::string& filename) {
 
 int main(int argc, char** argv)
 {
+	auto inicio = std::chrono::high_resolution_clock::now();
     if (argc < 3) {
         std::cerr << "USAGE: " << argv[0] << " <carpeta_imagenes> <archivo_salida_base>\n";
         return 1;
@@ -232,6 +233,8 @@ int main(int argc, char** argv)
     }
 
     std::cout << "Comparaciones completadas.\n";
-
+    auto fin = std::chrono::high_resolution_clock::now();  
+    std::chrono::duration<double> duracion = fin - inicio;
+    std::cout << " Tiempo total de ejecución: " << duracion.count() << " segundos.\n";
     return 0;
 }
