@@ -87,6 +87,7 @@ std::string removeExtension(const std::string& filename) {
 
 int main(int argc, char** argv)
 {
+	auto inicio = std::chrono::high_resolution_clock::now();
     if (argc < 3) {
         std::cerr << "USAGE: " << argv[0] << " <carpeta_imagenes> <archivo_salida_base>\n";
         return 1;
@@ -95,38 +96,31 @@ int main(int argc, char** argv)
     std::string carpeta = argv[1];
     std::string archivoSalidaBase = argv[2];
 
-    std::vector<fs::path> imagenesPaths;
+    std::vector<fs::path> imagenes;
 
-    // Buscar imágenes en la carpeta
     for (const auto& entrada : fs::directory_iterator(carpeta)) {
         if (entrada.is_regular_file()) {
             std::string ext = entrada.path().extension().string();
             std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
             if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp" || ext == ".tif") {
-                imagenesPaths.push_back(entrada.path());
+                imagenes.push_back(entrada.path());
             }
         }
     }
 
-    if (imagenesPaths.size() < 2) {
+    if (imagenes.size() < 2) {
         std::cerr << "Debe haber al menos 2 imágenes válidas en la carpeta.\n";
         return 1;
     }
 
-    // Leer imágenes una vez
-    std::vector<FImage> imagenes(imagenesPaths.size());
-    for (size_t i = 0; i < imagenesPaths.size(); ++i) {
-        imagenes[i].imread(imagenesPaths[i].string().c_str());
-    }
-
-    // Número de hilos
+    // Cantidad de hilos
     const int numThreads = 8;
     omp_set_num_threads(numThreads);
 
-    // Crear archivos de salida separados por hilo
+    // Abrir archivos de salida por hilo e imprimir encabezados
     std::vector<std::ofstream> archivosSalida(numThreads);
     for (int t = 0; t < numThreads; ++t) {
-        std::string nombreArchivo = archivoSalidaBase + "thread" + std::to_string(t) + ".csv";
+        std::string nombreArchivo = archivoSalidaBase + "_thread_" + std::to_string(t) + ".csv";
         archivosSalida[t].open(nombreArchivo);
         if (!archivosSalida[t].is_open()) {
             std::cerr << "No se pudo abrir el archivo de salida: " << nombreArchivo << "\n";
@@ -137,32 +131,31 @@ int main(int argc, char** argv)
 
     std::cout << "Usando " << numThreads << " hilos.\n";
 
-    size_t numImagenes = imagenes.size();
-
-    // Paralelizar el doble for: comparar todos con todos (incluyendo i == j)
-    size_t totalComparaciones = 0;
-    auto tiempo_inicio = std::chrono::high_resolution_clock::now();
-    #pragma omp parallel for collapse(2) schedule(dynamic,1)
-    for (size_t i = 0; i < numImagenes; ++i) {
-        for (size_t j = 0; j < numImagenes; ++j) {
+    // Paralelizar el doble for con OpenMP
+    #pragma omp parallel for collapse(2) schedule(dynamic)
+    for (int i = 0; i < (int)imagenes.size(); ++i) {
+        for (int j = 0; j < (int)imagenes.size(); ++j) {
             int tid = omp_get_thread_num();
             auto start = std::chrono::high_resolution_clock::now();
 
-            // Verificar dimensiones
-            if (imagenes[i].width() != imagenes[j].width() || imagenes[i].height() != imagenes[j].height()) {
+            FImage img1, img2;
+            img1.imread(imagenes[i].string().c_str());
+            img2.imread(imagenes[j].string().c_str());
+
+            if (img1.width() != img2.width() || img1.height() != img2.height()) {
                 #pragma omp critical
                 std::cerr << "Imágenes con diferentes dimensiones: "
-                          << imagenesPaths[i] << " y " << imagenesPaths[j] << "\n";
+                          << imagenes[i] << " y " << imagenes[j] << "\n";
                 continue;
             }
 
-            int w = imagenes[i].width();
-            int h = imagenes[i].height();
+            int w = img1.width();
+            int h = img1.height();
 
             FImage matches, u, v;
             CPM cpm;
             cpm.SetStep(3);
-            cpm.Matching(imagenes[i], imagenes[j], matches);
+            cpm.Matching(img1, img2, matches);
             Match2Flow(matches, u, v, w, h);
 
             double menor = std::numeric_limits<double>::max();
@@ -188,7 +181,7 @@ int main(int argc, char** argv)
             if (conta1 == 0 || conta2 == 0) {
                 #pragma omp critical
                 std::cerr << "Flujo desconocido en todas las posiciones entre "
-                          << imagenesPaths[i] << " y " << imagenesPaths[j] << "\n";
+                          << imagenes[i] << " y " << imagenes[j] << "\n";
                 f = 0.0;
             } else {
                 int shift = static_cast<int>(std::abs(menor));
@@ -214,23 +207,23 @@ int main(int argc, char** argv)
                 }
             }
 
-            std::string nombre1 = removeExtension(imagenesPaths[i].filename().string());
-            std::string nombre2 = removeExtension(imagenesPaths[j].filename().string());
+            std::string nombre1 = removeExtension(imagenes[i].filename().string());
+            std::string nombre2 = removeExtension(imagenes[j].filename().string());
 
             auto end = std::chrono::high_resolution_clock::now();
             double duracion = std::chrono::duration<double, std::milli>(end - start).count();
 
-            // Guardar resultados sin sección crítica porque cada hilo tiene su propio archivo
-            archivosSalida[tid] << nombre1 << "," << nombre2 << "," << (std::isnan(f) ? 0.0 : f) << "," << duracion << "\n";
+            // Escribir resultado en archivo correspondiente al hilo
+            #pragma omp critical
+            {
+                archivosSalida[tid] << nombre1 << "," << nombre2 << "," << (std::isnan(f) ? 0.0 : f) << "," << duracion << "\n";
+            }
 
-            // Si quieres info en consola, puedes dejar este bloque con critical para evitar mezclas
             #pragma omp critical
             {
                 std::cout << "Hilo " << tid << " comparó: " << nombre1 << " vs " << nombre2
                           << " = " << f << " en " << duracion << " ms\n";
             }
-	    #pragma omp atomic
-            totalComparaciones++;
         }
     }
 
@@ -238,11 +231,10 @@ int main(int argc, char** argv)
     for (int t = 0; t < numThreads; ++t) {
         archivosSalida[t].close();
     }
-    auto tiempo_fin = std::chrono::high_resolution_clock::now();
 
-    double duracion_ms = std::chrono::duration<double, std::milli>(tiempo_fin - tiempo_inicio).count();
     std::cout << "Comparaciones completadas.\n";
-    std::cout << "Total de comparaciones realizadas: " << totalComparaciones << std::endl;
-    std::cout << "Tiempo total de ejecución: " << duracion_ms << " ms" << std::endl;
+    auto fin = std::chrono::high_resolution_clock::now();  
+    std::chrono::duration<double> duracion = fin - inicio;
+    std::cout << " Tiempo total de ejecución: " << duracion.count() << " segundos.\n";
     return 0;
 }
